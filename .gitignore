@@ -1,0 +1,27 @@
+# Файл с секретами (токен бота)
+.env
+
+# Скомпилированный бинарник
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+mtuci-task-manager
+
+# Файлы тестов
+*.test
+
+# Профилирование
+*.prof
+
+# Папки IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Системные файлы
+.DS_Store
+Thumbs.db

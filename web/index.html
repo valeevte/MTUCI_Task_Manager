@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>MTUCI Task Manager</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- Telegram Web App SDK — обязательно подключить -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+    <div id="app">
+
+        <!-- ============================================================ -->
+        <!-- ЭКРАН 1: Список задач -->
+        <!-- ============================================================ -->
+        <div id="task-list-view">
+            <div class="header">
+                <h1>Мои задачи</h1>
+                <button id="add-task-btn" class="btn-primary">+ Новая</button>
+            </div>
+
+            <!-- Сюда рендерятся карточки задач -->
+            <div id="tasks-container">
+                <div class="loading">Загрузка...</div>
+            </div>
+
+            <!-- Пустое состояние (нет задач) -->
+            <div id="empty-state" class="empty-state hidden">
+                <div class="empty-icon">📭</div>
+                <p>У тебя пока нет задач</p>
+                <button class="btn-primary" onclick="showCreateForm()">Создать первую задачу</button>
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- ЭКРАН 2: Создание задачи -->
+        <!-- ============================================================ -->
+        <div id="create-task-view" class="hidden">
+            <div class="header">
+                <h1>Новая задача</h1>
+            </div>
+            <form id="create-task-form">
+                <div class="form-group">
+                    <label for="task-title">Название</label>
+                    <input type="text" id="task-title" placeholder="Что нужно сделать?" required>
+                </div>
+                <div class="form-group">
+                    <label for="task-description">Описание (необязательно)</label>
+                    <textarea id="task-description" placeholder="Подробности задачи..." rows="3"></textarea>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn-secondary" onclick="showTaskList()">Отмена</button>
+                    <button type="submit" class="btn-primary">Создать</button>
+                </div>
+            </form>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- ЭКРАН 3: Детали задачи -->
+        <!-- ============================================================ -->
+        <div id="task-detail-view" class="hidden">
+            <div class="header">
+                <button class="btn-back" onclick="showTaskList()">&#8592; Назад</button>
+            </div>
+            <div id="task-detail-content"></div>
+        </div>
+
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
