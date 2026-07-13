@@ -5,67 +5,146 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>MTUCI Task Manager</title>
     <link rel="stylesheet" href="style.css">
-    <!-- Telegram Web App SDK — обязательно подключить -->
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
     <div id="app">
-
-        <!-- ============================================================ -->
-        <!-- ЭКРАН 1: Список задач -->
-        <!-- ============================================================ -->
-        <div id="task-list-view">
-            <div class="header">
-                <h1>Мои задачи</h1>
-                <button id="add-task-btn" class="btn-primary">+ Новая</button>
-            </div>
-
-            <!-- Сюда рендерятся карточки задач -->
-            <div id="tasks-container">
-                <div class="loading">Загрузка...</div>
-            </div>
-
-            <!-- Пустое состояние (нет задач) -->
-            <div id="empty-state" class="empty-state hidden">
-                <div class="empty-icon">📭</div>
-                <p>У тебя пока нет задач</p>
-                <button class="btn-primary" onclick="showCreateForm()">Создать первую задачу</button>
-            </div>
+        <div class="tabs">
+            <button id="tab-personal" class="tab-btn active">Личные</button>
+            <button id="tab-groups" class="tab-btn">Группы</button>
         </div>
 
-        <!-- ============================================================ -->
-        <!-- ЭКРАН 2: Создание задачи -->
-        <!-- ============================================================ -->
-        <div id="create-task-view" class="hidden">
-            <div class="header">
-                <h1>Новая задача</h1>
+        <section id="personal-root">
+            <div id="personal-list-view">
+                <div class="header">
+                    <h1>Мои задачи</h1>
+                    <button id="add-task-btn" class="btn-primary">+ Новая</button>
+                </div>
+                <div id="tasks-container">
+                    <div class="loading">Загрузка...</div>
+                </div>
+                <div id="empty-state" class="empty-state hidden">
+                    <div class="empty-icon">📭</div>
+                    <p>У тебя пока нет задач</p>
+                    <button id="create-first-task" class="btn-primary">Создать первую задачу</button>
+                </div>
             </div>
-            <form id="create-task-form">
-                <div class="form-group">
-                    <label for="task-title">Название</label>
-                    <input type="text" id="task-title" placeholder="Что нужно сделать?" required>
+
+            <div id="personal-create-view" class="hidden">
+                <div class="header">
+                    <h1>Новая задача</h1>
                 </div>
-                <div class="form-group">
-                    <label for="task-description">Описание (необязательно)</label>
-                    <textarea id="task-description" placeholder="Подробности задачи..." rows="3"></textarea>
+                <form id="create-task-form">
+                    <div class="form-group">
+                        <label for="task-title">Название</label>
+                        <input type="text" id="task-title" placeholder="Что нужно сделать?" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="task-description">Описание (необязательно)</label>
+                        <textarea id="task-description" placeholder="Подробности задачи..." rows="3"></textarea>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" id="cancel-create-task" class="btn-secondary">Отмена</button>
+                        <button type="submit" class="btn-primary">Создать</button>
+                    </div>
+                </form>
+            </div>
+
+            <div id="personal-detail-view" class="hidden">
+                <div class="header">
+                    <button id="personal-back-btn" class="btn-back">&#8592; Назад</button>
                 </div>
-                <div class="form-actions">
-                    <button type="button" class="btn-secondary" onclick="showTaskList()">Отмена</button>
+                <div id="task-detail-content"></div>
+            </div>
+        </section>
+
+        <section id="groups-root" class="hidden">
+            <div id="groups-list-view">
+                <div class="header">
+                    <h1>Рабочие группы</h1>
+                </div>
+
+                <form id="create-group-form" class="inline-form">
+                    <input type="text" id="group-name" placeholder="Название группы" required>
                     <button type="submit" class="btn-primary">Создать</button>
+                </form>
+
+                <div id="groups-container">
+                    <div class="loading">Загрузка...</div>
                 </div>
-            </form>
-        </div>
 
-        <!-- ============================================================ -->
-        <!-- ЭКРАН 3: Детали задачи -->
-        <!-- ============================================================ -->
-        <div id="task-detail-view" class="hidden">
-            <div class="header">
-                <button class="btn-back" onclick="showTaskList()">&#8592; Назад</button>
+                <div id="groups-empty" class="empty-state hidden">
+                    <div class="empty-icon">👥</div>
+                    <p>Групп пока нет</p>
+                </div>
             </div>
-            <div id="task-detail-content"></div>
-        </div>
 
+            <div id="group-board-view" class="hidden">
+                <div class="header">
+                    <button id="group-board-back-btn" class="btn-back">&#8592; К группам</button>
+                    <button id="delete-group-btn" class="btn-danger-outline hidden">Удалить группу</button>
+                </div>
+
+                <h2 id="group-title" class="section-heading"></h2>
+
+                <div class="section-block">
+                    <div class="section-title">Участники</div>
+                    <form id="add-member-form" class="inline-form">
+                        <input type="text" id="member-username" placeholder="@username" required>
+                        <button type="submit" class="btn-primary">Добавить</button>
+                    </form>
+                    <div id="members-container"></div>
+                </div>
+
+                <div class="section-block">
+                    <div class="section-header-row">
+                        <div class="section-title">Задачи группы</div>
+                        <button id="add-group-task-btn" class="btn-primary">+ Задача</button>
+                    </div>
+                    <div id="group-tasks-container"></div>
+                    <div id="group-tasks-empty" class="empty-state hidden">
+                        <div class="empty-icon">🗂</div>
+                        <p>Задач в группе пока нет</p>
+                    </div>
+                </div>
+            </div>
+
+            <div id="group-task-create-view" class="hidden">
+                <div class="header">
+                    <button id="group-task-create-back-btn" class="btn-back">&#8592; Назад</button>
+                    <h1>Новая групповая задача</h1>
+                </div>
+
+                <form id="create-group-task-form">
+                    <div class="form-group">
+                        <label for="group-task-title">Название</label>
+                        <input type="text" id="group-task-title" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="group-task-description">Описание (необязательно)</label>
+                        <textarea id="group-task-description" rows="3"></textarea>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="group-task-assignee">Ответственный (необязательно)</label>
+                        <input type="text" id="group-task-assignee" placeholder="@username">
+                    </div>
+
+                    <div class="form-actions">
+                        <button type="button" id="cancel-group-task-create" class="btn-secondary">Отмена</button>
+                        <button type="submit" class="btn-primary">Создать</button>
+                    </div>
+                </form>
+            </div>
+
+            <div id="group-task-detail-view" class="hidden">
+                <div class="header">
+                    <button id="group-task-detail-back-btn" class="btn-back">&#8592; Назад</button>
+                </div>
+                <div id="group-task-detail-content"></div>
+            </div>
+        </section>
     </div>
 
     <script src="app.js"></script>

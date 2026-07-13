@@ -60,6 +60,7 @@ func main() {
 	//   - /*         — статические файлы фронтенда (папка web/)
 	// ============================================================
 	apiServer := api.NewServer(storage, token)
+	apiServer.SetNotifier(b.SendNotification)
 	go func() {
 		router := apiServer.Router()
 		log.Printf("🌐 HTTP-сервер запущен на http://localhost:%s", port)

@@ -28,6 +28,40 @@ type TelegramUser struct {
 	Username  string `json:"username"`
 }
 
+func extractInitData(r *http.Request) string {
+	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+	if authHeader != "" {
+		lower := strings.ToLower(authHeader)
+		switch {
+		case strings.HasPrefix(lower, "tma "):
+			return strings.TrimSpace(authHeader[4:])
+		case strings.HasPrefix(lower, "bearer "):
+			token := strings.TrimSpace(authHeader[7:])
+			tokenLower := strings.ToLower(token)
+			if strings.HasPrefix(tokenLower, "tma ") {
+				return strings.TrimSpace(token[4:])
+			}
+			return token
+		default:
+			return authHeader
+		}
+	}
+
+	if h := strings.TrimSpace(r.Header.Get("X-Telegram-Init-Data")); h != "" {
+		return h
+	}
+
+	if q := strings.TrimSpace(r.URL.Query().Get("initData")); q != "" {
+		return q
+	}
+
+	if q := strings.TrimSpace(r.URL.Query().Get("tgWebAppData")); q != "" {
+		return q
+	}
+
+	return ""
+}
+
 // withAuth — middleware, проверяющий авторизацию через Telegram initData
 //
 // Заголовок запроса должен содержать: Authorization: tma <initData>
@@ -40,23 +74,24 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		// ============================================================
 		if os.Getenv("DEV_MODE") == "true" {
 			log.Println("⚠️  DEV_MODE: авторизация пропущена")
-			user := &TelegramUser{ID: 12345, FirstName: "Developer"}
+			user := &TelegramUser{
+				ID:        12345,
+				FirstName: "Developer",
+				Username:  "developer",
+			}
+			s.storage.UpsertVerifiedUser(user.ID, user.Username, user.FirstName, user.LastName)
 			ctx := context.WithValue(r.Context(), userContextKey, user)
 			next(w, r.WithContext(ctx))
 			return
 		}
 
-		// Получаем заголовок Authorization
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
+		initData := extractInitData(r)
+		if initData == "" {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{
-				"error": "отсутствует заголовок Authorization",
+				"error": "отсутствуют auth данные (Authorization, X-Telegram-Init-Data, initData)",
 			})
 			return
 		}
-
-		// Извлекаем initData (убираем префикс "tma ")
-		initData := strings.TrimPrefix(authHeader, "tma ")
 
 		// Валидируем подпись и извлекаем данные пользователя
 		user, err := validateInitData(initData, s.botToken)
@@ -67,6 +102,8 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			})
 			return
 		}
+
+		s.storage.UpsertVerifiedUser(user.ID, user.Username, user.FirstName, user.LastName)
 
 		// Сохраняем пользователя в контекст запроса
 		ctx := context.WithValue(r.Context(), userContextKey, user)

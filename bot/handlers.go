@@ -27,6 +27,8 @@ const (
 // 3. Если нет — обрабатываем как команду или кнопку меню
 // ============================================================
 func (b *Bot) handleMessage(msg *tgbotapi.Message) {
+	b.registerUser(msg.From)
+
 	userID := msg.From.ID
 	chatID := msg.Chat.ID
 
@@ -205,6 +207,8 @@ func (b *Bot) handleAbout(chatID int64) {
 // По этой строке мы определяем, какое действие выполнить
 // ============================================================
 func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
+	b.registerUser(cb.From)
+
 	userID := cb.From.ID
 	chatID := cb.Message.Chat.ID
 	data := cb.Data

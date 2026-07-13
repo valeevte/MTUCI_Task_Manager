@@ -3,6 +3,8 @@ package api
 import (
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -23,20 +25,54 @@ func (s *Server) Router() http.Handler {
 	// ============================================================
 	// API-маршруты (требуют авторизации)
 	// ============================================================
+	mux.HandleFunc("GET /api/me", s.withAuth(s.handleMe))
 	mux.HandleFunc("GET /api/tasks", s.withAuth(s.handleGetTasks))
 	mux.HandleFunc("POST /api/tasks", s.withAuth(s.handleCreateTask))
 	mux.HandleFunc("PATCH /api/tasks/{id}/status", s.withAuth(s.handleUpdateStatus))
 	mux.HandleFunc("DELETE /api/tasks/{id}", s.withAuth(s.handleDeleteTask))
 
+	mux.HandleFunc("GET /api/groups", s.withAuth(s.handleGetGroups))
+	mux.HandleFunc("POST /api/groups", s.withAuth(s.handleCreateGroup))
+	mux.HandleFunc("DELETE /api/groups/{groupId}", s.withAuth(s.handleDeleteGroup))
+
+	mux.HandleFunc("GET /api/groups/{groupId}/members", s.withAuth(s.handleGetGroupMembers))
+	mux.HandleFunc("POST /api/groups/{groupId}/members", s.withAuth(s.handleAddGroupMember))
+	mux.HandleFunc("DELETE /api/groups/{groupId}/members/{memberId}", s.withAuth(s.handleDeleteGroupMember))
+
+	mux.HandleFunc("GET /api/groups/{groupId}/tasks", s.withAuth(s.handleGetGroupTasks))
+	mux.HandleFunc("POST /api/groups/{groupId}/tasks", s.withAuth(s.handleCreateGroupTask))
+	mux.HandleFunc("PATCH /api/groups/{groupId}/tasks/{taskId}/status", s.withAuth(s.handleUpdateGroupTaskStatus))
+	mux.HandleFunc("PATCH /api/groups/{groupId}/tasks/{taskId}/assignee", s.withAuth(s.handleSetGroupTaskAssignee))
+	mux.HandleFunc("DELETE /api/groups/{groupId}/tasks/{taskId}", s.withAuth(s.handleDeleteGroupTask))
+
 	// ============================================================
 	// Статические файлы (Mini App фронтенд)
 	// Всё, что не /api/*, отдаётся из папки web/
 	// ============================================================
-	fs := http.FileServer(http.Dir("web"))
+	fs := http.FileServer(http.Dir(findWebDir()))
 	mux.Handle("/", fs)
 
 	// Оборачиваем в middleware: логирование → CORS → маршрутизация
 	return loggingMiddleware(corsMiddleware(mux))
+}
+
+func findWebDir() string {
+	candidates := []string{"web"}
+	if wd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, filepath.Join(wd, "web"))
+	}
+	if execPath, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(execPath), "web"))
+	}
+
+	for _, dir := range candidates {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return dir
+		}
+	}
+
+	log.Println("⚠️  Папка web/ не найдена, используем относительный путь web")
+	return "web"
 }
 
 // loggingMiddleware логирует все входящие API-запросы
@@ -61,7 +97,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, ngrok-skip-browser-warning")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Telegram-Init-Data, ngrok-skip-browser-warning")
 
 		// Preflight-запрос — браузер спрашивает, можно ли отправить запрос
 		if r.Method == "OPTIONS" {

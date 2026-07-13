@@ -70,7 +70,7 @@ func (b *Bot) Start() {
 
 	// Читаем обновления из канала в бесконечном цикле
 	for update := range updates {
-		// ⚡ Каждое обновление обрабатываем в отдельной горутине (goroutine)
+		// Каждое обновление обрабатываем в отдельной горутине (goroutine)
 		// Это позволяет обрабатывать несколько сообщений одновременно
 		go b.handleUpdate(update)
 	}
@@ -124,4 +124,23 @@ func (b *Bot) resetUserState(userID int64) {
 	defer b.mu.Unlock()
 
 	b.users[userID] = &UserState{}
+}
+
+// registerUser сохраняет данные Telegram-пользователя для группового режима.
+func (b *Bot) registerUser(from *tgbotapi.User) {
+	if from == nil {
+		return
+	}
+	b.storage.UpsertVerifiedUser(from.ID, from.UserName, from.FirstName, from.LastName)
+}
+
+// SendNotification отправляет служебное уведомление пользователю в Telegram.
+// Используется HTTP API для событий по групповым задачам.
+func (b *Bot) SendNotification(userID int64, text string) error {
+	msg := tgbotapi.NewMessage(userID, text)
+	_, err := b.api.Send(msg)
+	if err != nil {
+		log.Printf("❌ Ошибка отправки уведомления user=%d: %v", userID, err)
+	}
+	return err
 }
