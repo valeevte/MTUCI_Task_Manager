@@ -13,9 +13,9 @@ import (
 // Шаги диалога — определяют, чего бот ждёт от пользователя
 // ============================================================
 const (
-	StepNone        = ""                    // Обычное состояние (ничего не ждём)
-	StepWaitTitle   = "waiting_title"       // Ждём ввод названия задачи
-	StepWaitDesc    = "waiting_description" // Ждём ввод описания задачи
+	StepNone      = ""                    // Обычное состояние (ничего не ждём)
+	StepWaitTitle = "waiting_title"       // Ждём ввод названия задачи
+	StepWaitDesc  = "waiting_description" // Ждём ввод описания задачи
 )
 
 // ============================================================
@@ -27,10 +27,45 @@ const (
 // 3. Если нет — обрабатываем как команду или кнопку меню
 // ============================================================
 func (b *Bot) handleMessage(msg *tgbotapi.Message) {
+	if msg == nil || msg.From == nil || msg.Chat == nil {
+		return
+	}
 	b.registerUser(msg.From)
 
 	userID := msg.From.ID
 	chatID := msg.Chat.ID
+
+	// Команды обрабатываются раньше состояния диалога, чтобы /cancel и /start
+	// не превращались в название или описание создаваемой задачи.
+	if msg.IsCommand() {
+		switch msg.Command() {
+		case "start":
+			b.resetUserState(userID)
+			b.handleStart(chatID)
+		case "cancel":
+			b.resetUserState(userID)
+			b.sendText(chatID, "Создание задачи отменено.")
+		default:
+			b.sendText(chatID, "🤔 Неизвестная команда. Используй кнопки меню 👇")
+		}
+		return
+	}
+
+	// Кнопки главного меню тоже прерывают незавершённый диалог: иначе, например,
+	// «📋 Мои задачи» ошибочно сохранялось бы как название новой задачи.
+	switch msg.Text {
+	case "📋 Мои задачи":
+		b.resetUserState(userID)
+		b.handleTaskList(chatID, userID)
+		return
+	case "➕ Новая задача":
+		b.handleNewTask(chatID, userID)
+		return
+	case "ℹ️ О боте":
+		b.resetUserState(userID)
+		b.handleAbout(chatID)
+		return
+	}
 
 	// Получаем текущее состояние диалога пользователя
 	state := b.getUserState(userID)
@@ -45,24 +80,8 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		return
 	}
 
-	// Обработка команд и кнопок главного меню
-	switch msg.Text {
-	case "/start":
-		b.handleStart(chatID)
-
-	case "📋 Мои задачи":
-		b.handleTaskList(chatID, userID)
-
-	case "➕ Новая задача":
-		b.handleNewTask(chatID, userID)
-
-	case "ℹ️ О боте":
-		b.handleAbout(chatID)
-
-	default:
-		// Неизвестная команда — подсказываем использовать меню
-		b.sendText(chatID, "🤔 Не понимаю. Используй кнопки меню 👇")
-	}
+	// Неизвестная команда — подсказываем использовать меню.
+	b.sendText(chatID, "🤔 Не понимаю. Используй кнопки меню 👇")
 }
 
 // ============================================================
@@ -117,24 +136,27 @@ func (b *Bot) handleTaskList(chatID, userID int64) {
 
 // handleNewTask — начинает процесс создания новой задачи
 func (b *Bot) handleNewTask(chatID, userID int64) {
-	// Устанавливаем шаг "ждём название"
-	state := b.getUserState(userID)
-	b.mu.Lock()
-	state.Step = StepWaitTitle
-	state.TempTitle = ""
-	b.mu.Unlock()
+	b.setUserState(userID, UserState{Step: StepWaitTitle})
 
-	b.sendText(chatID, "✏️ Введи название задачи:")
+	b.sendText(chatID, "✏️ Введи название задачи (для отмены: /cancel):")
 }
 
 // handleTitleInput — пользователь ввёл название задачи
 func (b *Bot) handleTitleInput(chatID, userID int64, title string) {
-	// Сохраняем название и переходим к следующему шагу
-	state := b.getUserState(userID)
-	b.mu.Lock()
-	state.TempTitle = title
-	state.Step = StepWaitDesc
-	b.mu.Unlock()
+	normalizedTitle, _, err := ValidateTaskText(title, "")
+	if err != nil {
+		if err == ErrTaskTitleTooLong {
+			b.sendText(chatID, fmt.Sprintf("⚠️ Название слишком длинное (максимум %d символов).", MaxTaskTitleLength))
+		} else {
+			b.sendText(chatID, "⚠️ Название не может быть пустым.")
+		}
+		return
+	}
+
+	b.setUserState(userID, UserState{
+		Step:      StepWaitDesc,
+		TempTitle: normalizedTitle,
+	})
 
 	// Предлагаем ввести описание или пропустить
 	keyboard := skipKeyboard()
@@ -149,13 +171,21 @@ func (b *Bot) handleDescriptionInput(chatID, userID int64, description string) {
 // finishTaskCreation — завершает создание задачи и сохраняет её
 func (b *Bot) finishTaskCreation(chatID, userID int64, description string) {
 	state := b.getUserState(userID)
-
-	b.mu.Lock()
 	title := state.TempTitle
-	b.mu.Unlock()
 
 	// Проверяем, что название есть (на случай ошибки)
 	if title == "" {
+		b.sendText(chatID, "⚠️ Что-то пошло не так. Попробуй создать задачу заново.")
+		b.resetUserState(userID)
+		return
+	}
+
+	title, description, err := ValidateTaskText(title, description)
+	if err != nil {
+		if err == ErrTaskDescriptionTooLong {
+			b.sendText(chatID, fmt.Sprintf("⚠️ Описание слишком длинное (максимум %d символов).", MaxTaskDescriptionLength))
+			return
+		}
 		b.sendText(chatID, "⚠️ Что-то пошло не так. Попробуй создать задачу заново.")
 		b.resetUserState(userID)
 		return
@@ -184,14 +214,15 @@ func (b *Bot) finishTaskCreation(chatID, userID int64, description string) {
 // ============================================================
 func (b *Bot) handleAbout(chatID int64) {
 	text := "ℹ️ *MTUCI Task Manager*\n\n" +
-		"Версия: 0\\.1\\.0 \\(каркас\\)\n" +
+		"Версия: 1\\.0\\.0\n" +
 		"📌 Возможности:\n" +
 		"• Создание задач\n" +
 		"• Просмотр списка задач\n" +
 		"• Смена статуса\n" +
-		"• Удаление задач\n\n" +
+		"• Удаление задач\n" +
+		"• Совместные группы в Mini App\n\n" +
 		"🚧 В разработке:\n" +
-		"• Сохранение в PostgreSQL\n" +
+		"• Постоянное хранилище\n" +
 		"• Дедлайны и напоминания\n" +
 		"• Приоритеты задач"
 
@@ -207,15 +238,25 @@ func (b *Bot) handleAbout(chatID int64) {
 // По этой строке мы определяем, какое действие выполнить
 // ============================================================
 func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
+	if cb == nil || cb.From == nil {
+		return
+	}
 	b.registerUser(cb.From)
 
 	userID := cb.From.ID
-	chatID := cb.Message.Chat.ID
 	data := cb.Data
 
 	// Отвечаем на callback — убирает "часики" загрузки на кнопке
 	answer := tgbotapi.NewCallback(cb.ID, "")
-	b.api.Request(answer)
+	if _, err := b.api.Request(answer); err != nil {
+		log.Printf("❌ Ошибка ответа на callback: %v", err)
+	}
+
+	// У inline-mode callback нет сообщения и, следовательно, chat_id.
+	if cb.Message == nil || cb.Message.Chat == nil {
+		return
+	}
+	chatID := cb.Message.Chat.ID
 
 	// Определяем действие по callback data
 	switch {
@@ -266,18 +307,18 @@ func (b *Bot) showTaskDetail(chatID, userID int64, taskID int) {
 		return
 	}
 
-	// Формируем текст с деталями
-	text := fmt.Sprintf("📌 *%s*\n\n", escapeMarkdown(task.Title))
+	// Детали отправляются как обычный текст: пользовательское содержимое не
+	// раздувается Markdown-экранированием и не может сломать разметку.
+	text := fmt.Sprintf("📌 %s\n\n", task.Title)
 
 	if task.Description != "" {
-		text += fmt.Sprintf("📝 %s\n\n", escapeMarkdown(task.Description))
+		text += fmt.Sprintf("📝 %s\n\n", task.Description)
 	}
 
-	text += fmt.Sprintf("📊 Статус: %s\n", escapeMarkdown(task.Status))
-	text += fmt.Sprintf("📅 Создана: %s", escapeMarkdown(task.CreatedAt.Format("02.01.2006 15:04")))
+	text += fmt.Sprintf("📊 Статус: %s\n", task.Status)
+	text += fmt.Sprintf("📅 Создана: %s", task.CreatedAt.Format("02.01.2006 15:04"))
 
-	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = "MarkdownV2"
+	msg := tgbotapi.NewMessage(chatID, limitTelegramText(text))
 	keyboard := taskActionsKeyboard(taskID)
 	msg.ReplyMarkup = keyboard
 
@@ -364,7 +405,7 @@ func (b *Bot) send(msg tgbotapi.MessageConfig) {
 
 // sendText — отправляет простое текстовое сообщение
 func (b *Bot) sendText(chatID int64, text string) {
-	msg := tgbotapi.NewMessage(chatID, text)
+	msg := tgbotapi.NewMessage(chatID, limitTelegramText(text))
 	b.send(msg)
 }
 
@@ -386,28 +427,13 @@ func (b *Bot) parseID(data, prefix string) int {
 	return id
 }
 
-// escapeMarkdown — экранирует спецсимволы для формата MarkdownV2
-// Telegram требует экранировать эти символы обратным слешем
-func escapeMarkdown(text string) string {
-	replacer := strings.NewReplacer(
-		"_", "\\_",
-		"*", "\\*",
-		"[", "\\[",
-		"]", "\\]",
-		"(", "\\(",
-		")", "\\)",
-		"~", "\\~",
-		"`", "\\`",
-		">", "\\>",
-		"#", "\\#",
-		"+", "\\+",
-		"-", "\\-",
-		"=", "\\=",
-		"|", "\\|",
-		"{", "\\{",
-		"}", "\\}",
-		".", "\\.",
-		"!", "\\!",
-	)
-	return replacer.Replace(text)
+// Оставляем запас до лимита Bot API в 4096 символов: некоторые emoji
+// считаются клиентами как несколько кодовых единиц.
+func limitTelegramText(text string) string {
+	const safeLimit = 3800
+	runes := []rune(text)
+	if len(runes) <= safeLimit {
+		return text
+	}
+	return string(runes[:safeLimit-1]) + "…"
 }

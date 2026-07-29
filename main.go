@@ -1,9 +1,17 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+	"time"
 
 	"mtuci-task-manager/api"
 	"mtuci-task-manager/bot"
@@ -29,6 +37,10 @@ func main() {
 	webAppURL := os.Getenv("WEBAPP_URL")
 	if webAppURL == "" {
 		log.Println("⚠️  WEBAPP_URL не задан — кнопка «Открыть приложение» не появится в боте")
+	} else if parsed, err := url.ParseRequestURI(webAppURL); err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		// Bot API принимает для WebAppInfo только абсолютный HTTPS URL.
+		log.Println("⚠️  WEBAPP_URL должен быть абсолютным HTTPS URL — кнопка Mini App отключена")
+		webAppURL = ""
 	} else {
 		log.Printf("🌐 Mini App URL: %s", webAppURL)
 	}
@@ -37,6 +49,10 @@ func main() {
 	port := os.Getenv("SERVER_PORT")
 	if port == "" {
 		port = "8080"
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		log.Fatalf("❌ SERVER_PORT должен быть числом от 1 до 65535, получено %q", port)
 	}
 
 	// ============================================================
@@ -61,18 +77,42 @@ func main() {
 	// ============================================================
 	apiServer := api.NewServer(storage, token)
 	apiServer.SetNotifier(b.SendNotification)
+	httpServer := &http.Server{
+		Addr:              net.JoinHostPort("", port),
+		Handler:           apiServer.Router(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    64 << 10,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	serverErrors := make(chan error, 1)
 	go func() {
-		router := apiServer.Router()
 		log.Printf("🌐 HTTP-сервер запущен на http://localhost:%s", port)
-		if err := http.ListenAndServe(":"+port, router); err != nil {
-			log.Fatalf("❌ Ошибка HTTP-сервера: %v", err)
-		}
+		serverErrors <- httpServer.ListenAndServe()
 	}()
 
-	// ============================================================
-	// Запуск бота (в основном потоке)
-	// Start() запускает бесконечный цикл обработки сообщений
-	// ============================================================
+	go b.Start(ctx)
+
+	// Ожидание сигнала остановки или ошибки HTTP-сервера
 	log.Println("✅ Бот и HTTP-сервер запущены! Нажми Ctrl+C для остановки.")
-	b.Start()
+	select {
+	case <-ctx.Done():
+		log.Println("⏳ Останавливаем приложение...")
+	case err := <-serverErrors:
+		if !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("❌ Ошибка HTTP-сервера: %v", err)
+		}
+		stop()
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("❌ Ошибка корректной остановки HTTP-сервера: %v", err)
+	}
 }

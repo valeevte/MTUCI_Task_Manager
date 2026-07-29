@@ -20,51 +20,10 @@ const tg = window.Telegram?.WebApp || {
 tg.ready();
 tg.expand();
 
-function initDataFromLocation() {
-    try {
-        const searchParams = new URLSearchParams(window.location.search);
-        const fromSearch = searchParams.get('tgWebAppData') || searchParams.get('initData');
-        if (fromSearch) return fromSearch;
-
-        const hash = window.location.hash.startsWith('#')
-            ? window.location.hash.slice(1)
-            : window.location.hash;
-        if (!hash) return '';
-
-        const hashParams = new URLSearchParams(hash);
-        return hashParams.get('tgWebAppData') || hashParams.get('initData') || '';
-    } catch (e) {
-        return '';
-    }
-}
-
-const initData = (
-    tg.initData ||
-    initDataFromLocation() ||
-    window.localStorage.getItem('mtuci_init_data') ||
-    ''
-).trim();
-
-if (initData) {
-    window.localStorage.setItem('mtuci_init_data', initData);
-}
-
-function parseUserIdFromInitData(data) {
-    if (!data) return 0;
-    try {
-        const params = new URLSearchParams(data);
-        const userRaw = params.get('user');
-        if (!userRaw) return 0;
-        return Number(JSON.parse(userRaw).id || 0);
-    } catch (e) {
-        return 0;
-    }
-}
-
-let currentUserId = Number(tg.initDataUnsafe?.user?.id || 0);
-if (!currentUserId) {
-    currentUserId = parseUserIdFromInitData(initData);
-}
+// initData — короткоживущие учётные данные. Они берутся только из Telegram SDK
+// и намеренно не сохраняются в localStorage и не принимаются из URL.
+const initData = (tg.initData || '').trim();
+let currentUserId = 0;
 
 function normalizeUsername(value) {
     const trimmed = (value || '').trim();
@@ -99,34 +58,31 @@ async function api(method, path, body = null) {
         options.headers['X-Telegram-Init-Data'] = initData;
     }
 
-    if (body) {
+    if (body !== null) {
         options.headers['Content-Type'] = 'application/json';
         options.body = JSON.stringify(body);
     }
 
     const response = await fetch(API_BASE + path, options);
     const contentType = response.headers.get('content-type') || '';
-
-    if (!contentType.includes('application/json')) {
-        throw new Error('Сервер вернул неожиданный формат ответа');
-    }
-
-    const data = await response.json();
+    const data = contentType.includes('application/json')
+        ? await response.json()
+        : null;
     if (!response.ok) {
-        throw new Error(data.error || 'Ошибка сервера');
+        throw new Error(data?.error || `Ошибка сервера (${response.status})`);
+    }
+    if (data === null) {
+        throw new Error('Сервер вернул неожиданный формат ответа');
     }
 
     return data;
 }
 
 async function loadCurrentUser() {
-    try {
-        const user = await api('GET', '/me');
-        currentUserId = Number(user.id || 0);
-    } catch (e) {
-        if (!currentUserId) {
-            currentUserId = parseUserIdFromInitData(initData);
-        }
+    const user = await api('GET', '/me');
+    currentUserId = Number(user.id || 0);
+    if (!Number.isSafeInteger(currentUserId) || currentUserId <= 0) {
+        throw new Error('Сервер вернул некорректные данные пользователя');
     }
 }
 
@@ -212,7 +168,21 @@ function showError(message) {
     tg.showAlert(message);
 }
 
+async function submitOnce(form, action) {
+    const button = form.querySelector('button[type="submit"]');
+    if (!button || button.disabled) return;
+
+    button.disabled = true;
+    try {
+        await action();
+    } finally {
+        // Форму могли убрать из DOM после успешного действия.
+        if (button.isConnected) button.disabled = false;
+    }
+}
+
 function getStatusKey(status) {
+    if (typeof status !== 'string') return 'new';
     if (status.includes('Новая')) return 'new';
     if (status.includes('В работе')) return 'progress';
     if (status.includes('Выполнена')) return 'done';
@@ -222,6 +192,7 @@ function getStatusKey(status) {
 function formatDate(dateStr) {
     if (!dateStr) return '';
     const date = new Date(dateStr);
+    if (Number.isNaN(date.getTime())) return '';
     return date.toLocaleDateString('ru-RU', {
         day: '2-digit',
         month: '2-digit',
@@ -307,12 +278,12 @@ function showPersonalTaskDetail(taskID) {
 
         <div class="section-title">Изменить статус</div>
         <div class="task-actions">
-            <button class="btn-status ${statusKey === 'new' ? 'active' : ''}" data-personal-status="new">🆕 Новая</button>
-            <button class="btn-status ${statusKey === 'progress' ? 'active' : ''}" data-personal-status="progress">🔄 В работе</button>
-            <button class="btn-status ${statusKey === 'done' ? 'active' : ''}" data-personal-status="done">✅ Выполнена</button>
+            <button type="button" class="btn-status ${statusKey === 'new' ? 'active' : ''}" data-personal-status="new">🆕 Новая</button>
+            <button type="button" class="btn-status ${statusKey === 'progress' ? 'active' : ''}" data-personal-status="progress">🔄 В работе</button>
+            <button type="button" class="btn-status ${statusKey === 'done' ? 'active' : ''}" data-personal-status="done">✅ Выполнена</button>
         </div>
 
-        <button class="btn-delete" id="delete-personal-task">🗑 Удалить задачу</button>
+        <button type="button" class="btn-delete" id="delete-personal-task">🗑 Удалить задачу</button>
     `;
 
     content.querySelectorAll('[data-personal-status]').forEach(btn => {
@@ -393,7 +364,7 @@ function renderGroups() {
                 <div class="group-title">${escapeHtml(group.name)}</div>
                 <div class="group-meta">ID: ${group.id}</div>
             </div>
-            <button class="btn-secondary" data-open-group="${group.id}">Открыть</button>
+            <button type="button" class="btn-secondary" data-open-group="${group.id}">Открыть</button>
         </div>
     `).join('');
 }
@@ -424,6 +395,7 @@ async function openGroupBoard(groupID) {
 
     const canDeleteGroup = currentUserId > 0 && currentGroup.creator_id === currentUserId;
     document.getElementById('delete-group-btn').classList.toggle('hidden', !canDeleteGroup);
+    document.getElementById('add-member-form').classList.toggle('hidden', !canDeleteGroup);
 
     setGroupView('board');
 
@@ -440,12 +412,16 @@ function showGroupBoard() {
 
 async function loadGroupMembers() {
     if (!currentGroup) return;
+    const groupID = currentGroup.id;
 
     try {
-        groupMembers = await api('GET', `/groups/${currentGroup.id}/members`);
-        if (!Array.isArray(groupMembers)) groupMembers = [];
+        const members = await api('GET', `/groups/${groupID}/members`);
+        // Ответ от ранее открытой группы не должен перерисовать новую доску.
+        if (currentGroup?.id !== groupID) return;
+        groupMembers = Array.isArray(members) ? members : [];
         renderGroupMembers();
     } catch (err) {
+        if (currentGroup?.id !== groupID) return;
         document.getElementById('members-container').innerHTML =
             `<div class="loading">Ошибка загрузки участников: ${escapeHtml(err.message)}</div>`;
     }
@@ -458,6 +434,7 @@ function renderGroupMembers() {
         return;
     }
 
+    const canManageMembers = currentGroup?.creator_id === currentUserId;
     container.innerHTML = groupMembers.map(member => `
         <div class="member-row">
             <div>
@@ -465,8 +442,12 @@ function renderGroupMembers() {
                 <div class="member-username">${escapeHtml(member.username || '')}</div>
             </div>
             ${member.is_creator
-                ? '<span class="badge">Creator</span>'
-                : `<button class="btn-secondary" data-remove-member="${member.user_id}">Удалить</button>`}
+                ? '<span class="badge">Создатель</span>'
+                : canManageMembers
+                    ? `<button type="button" class="btn-secondary" data-remove-member="${member.user_id}">Удалить</button>`
+                    : member.user_id === currentUserId
+                        ? `<button type="button" class="btn-secondary" data-remove-member="${member.user_id}">Выйти</button>`
+                        : ''}
         </div>
     `).join('');
 }
@@ -487,12 +468,17 @@ async function addGroupMember(username) {
 function removeGroupMember(memberID) {
     if (!currentGroup) return;
 
-    tg.showConfirm('Удалить участника из группы?', async (confirmed) => {
+    const leaving = memberID === currentUserId;
+    tg.showConfirm(leaving ? 'Выйти из группы?' : 'Удалить участника из группы?', async (confirmed) => {
         if (!confirmed) return;
 
         try {
             await api('DELETE', `/groups/${currentGroup.id}/members/${memberID}`);
             haptic('light');
+            if (leaving) {
+                showGroupsList();
+                return;
+            }
             await Promise.all([loadGroupMembers(), loadGroupTasks()]);
         } catch (err) {
             showError('Ошибка удаления участника: ' + err.message);
@@ -518,12 +504,15 @@ async function deleteCurrentGroup() {
 
 async function loadGroupTasks() {
     if (!currentGroup) return;
+    const groupID = currentGroup.id;
 
     try {
-        groupTasks = await api('GET', `/groups/${currentGroup.id}/tasks`);
-        if (!Array.isArray(groupTasks)) groupTasks = [];
+        const tasks = await api('GET', `/groups/${groupID}/tasks`);
+        if (currentGroup?.id !== groupID) return;
+        groupTasks = Array.isArray(tasks) ? tasks : [];
         renderGroupTasks();
     } catch (err) {
+        if (currentGroup?.id !== groupID) return;
         document.getElementById('group-tasks-container').innerHTML =
             `<div class="loading">Ошибка загрузки задач: ${escapeHtml(err.message)}</div>`;
     }
@@ -600,19 +589,19 @@ function showGroupTaskDetail(taskID) {
 
         <div class="section-title">Изменить статус</div>
         <div class="task-actions">
-            <button class="btn-status ${statusKey === 'new' ? 'active' : ''}" data-group-status="new">🆕 Новая</button>
-            <button class="btn-status ${statusKey === 'progress' ? 'active' : ''}" data-group-status="progress">🔄 В работе</button>
-            <button class="btn-status ${statusKey === 'done' ? 'active' : ''}" data-group-status="done">✅ Выполнена</button>
+            <button type="button" class="btn-status ${statusKey === 'new' ? 'active' : ''}" data-group-status="new">🆕 Новая</button>
+            <button type="button" class="btn-status ${statusKey === 'progress' ? 'active' : ''}" data-group-status="progress">🔄 В работе</button>
+            <button type="button" class="btn-status ${statusKey === 'done' ? 'active' : ''}" data-group-status="done">✅ Выполнена</button>
         </div>
 
         <div class="section-title">Ответственный</div>
         <form id="set-assignee-form" class="inline-form">
-            <input type="text" id="set-assignee-username" placeholder="@username" value="${escapeHtml(task.assignee_username || '')}">
+            <input type="text" id="set-assignee-username" placeholder="@username" maxlength="33" autocomplete="off" spellcheck="false" value="${escapeHtml(task.assignee_username || '')}">
             <button type="submit" class="btn-primary">Назначить</button>
         </form>
-        <button id="clear-assignee-btn" class="btn-secondary full-width">Сделать общей задачей</button>
+        <button type="button" id="clear-assignee-btn" class="btn-secondary full-width">Сделать общей задачей</button>
 
-        <button id="delete-group-task-btn" class="btn-delete">🗑 Удалить задачу</button>
+        <button type="button" id="delete-group-task-btn" class="btn-delete">🗑 Удалить задачу</button>
     `;
 
     content.querySelectorAll('[data-group-status]').forEach(btn => {
@@ -622,7 +611,7 @@ function showGroupTaskDetail(taskID) {
     document.getElementById('set-assignee-form').addEventListener('submit', (e) => {
         e.preventDefault();
         const value = document.getElementById('set-assignee-username').value.trim();
-        setGroupTaskAssignee(task.id, value);
+        submitOnce(e.currentTarget, () => setGroupTaskAssignee(task.id, value));
     });
 
     document.getElementById('clear-assignee-btn').addEventListener('click', () => {
@@ -698,7 +687,7 @@ document.getElementById('create-task-form').addEventListener('submit', (e) => {
     const title = document.getElementById('task-title').value.trim();
     const description = document.getElementById('task-description').value.trim();
     if (title) {
-        createPersonalTask(title, description);
+        submitOnce(e.currentTarget, () => createPersonalTask(title, description));
     }
 });
 
@@ -712,7 +701,7 @@ document.getElementById('create-group-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const name = document.getElementById('group-name').value.trim();
     if (name) {
-        createGroup(name);
+        submitOnce(e.currentTarget, () => createGroup(name));
     }
 });
 
@@ -729,7 +718,7 @@ document.getElementById('add-member-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const username = document.getElementById('member-username').value.trim();
     if (username) {
-        addGroupMember(username);
+        submitOnce(e.currentTarget, () => addGroupMember(username));
     }
 });
 
@@ -750,7 +739,7 @@ document.getElementById('create-group-task-form').addEventListener('submit', (e)
     const description = document.getElementById('group-task-description').value.trim();
     const assignee = document.getElementById('group-task-assignee').value.trim();
     if (title) {
-        createGroupTask(title, description, assignee);
+        submitOnce(e.currentTarget, () => createGroupTask(title, description, assignee));
     }
 });
 
@@ -764,6 +753,15 @@ document.getElementById('group-tasks-container').addEventListener('click', (e) =
 // Запуск
 // ============================================================
 (async function init() {
-    await loadCurrentUser();
-    setActiveTab('personal');
+    try {
+        await loadCurrentUser();
+        setActiveTab('personal');
+    } catch (err) {
+        document.getElementById('tasks-container').innerHTML =
+            `<div class="loading">Не удалось войти: ${escapeHtml(err.message)}. Откройте приложение из Telegram.</div>`;
+        document.querySelectorAll('button, input, textarea').forEach(element => {
+            element.disabled = true;
+        });
+        showError('Не удалось авторизоваться. Откройте Mini App из Telegram ещё раз.');
+    }
 })();

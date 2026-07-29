@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -13,6 +14,8 @@ import (
 )
 
 type NotificationSender func(userID int64, message string) error
+
+const maxJSONBodySize = 64 << 10
 
 // Server — HTTP API сервер
 // Содержит ссылку на общее хранилище задач и токен бота.
@@ -49,11 +52,19 @@ func statusFromKey(status string) (string, bool) {
 }
 
 func groupIDFromPath(r *http.Request) (int, error) {
-	return strconv.Atoi(r.PathValue("groupId"))
+	return positiveID(r.PathValue("groupId"))
 }
 
 func taskIDFromPath(r *http.Request) (int, error) {
-	return strconv.Atoi(r.PathValue("taskId"))
+	return positiveID(r.PathValue("taskId"))
+}
+
+func positiveID(value string) (int, error) {
+	id, err := strconv.Atoi(value)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("invalid positive id")
+	}
+	return id, nil
 }
 
 func writeStorageError(w http.ResponseWriter, err error) {
@@ -64,10 +75,15 @@ func writeStorageError(w http.ResponseWriter, err error) {
 		errors.Is(err, bot.ErrMemberNotFound):
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 	case errors.Is(err, bot.ErrForbidden),
-		errors.Is(err, bot.ErrOnlyCreatorCanDelete):
+		errors.Is(err, bot.ErrOnlyCreatorCanDelete),
+		errors.Is(err, bot.ErrOnlyCreatorCanManage):
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 	case errors.Is(err, bot.ErrInvalidGroupName),
 		errors.Is(err, bot.ErrInvalidTaskTitle),
+		errors.Is(err, bot.ErrTaskTitleTooLong),
+		errors.Is(err, bot.ErrTaskDescriptionTooLong),
+		errors.Is(err, bot.ErrGroupNameTooLong),
+		errors.Is(err, bot.ErrInvalidStatus),
 		errors.Is(err, bot.ErrInvalidUsername):
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 	case errors.Is(err, bot.ErrUserAlreadyInGroup),
@@ -80,7 +96,7 @@ func writeStorageError(w http.ResponseWriter, err error) {
 	}
 }
 
-func (s *Server) notifyGroupTaskEvent(groupID int, task bot.GroupTask, event string) {
+func (s *Server) notifyGroupTaskEvent(groupID int, task bot.GroupTask, event string, additionalRecipients ...int64) {
 	if s.notify == nil {
 		return
 	}
@@ -94,6 +110,21 @@ func (s *Server) notifyGroupTaskEvent(groupID int, task bot.GroupTask, event str
 	if err != nil {
 		log.Printf("❌ notify recipients error: %v", err)
 		return
+	}
+	seen := make(map[int64]struct{}, len(recipients)+len(additionalRecipients))
+	orderedRecipients := make([]int64, 0, len(recipients)+len(additionalRecipients))
+	for _, userID := range recipients {
+		seen[userID] = struct{}{}
+		orderedRecipients = append(orderedRecipients, userID)
+	}
+	for _, userID := range additionalRecipients {
+		if userID > 0 {
+			if _, exists := seen[userID]; exists {
+				continue
+			}
+			seen[userID] = struct{}{}
+			orderedRecipients = append(orderedRecipients, userID)
+		}
 	}
 
 	assignee := "👥 Общая задача"
@@ -110,7 +141,7 @@ func (s *Server) notifyGroupTaskEvent(groupID int, task bot.GroupTask, event str
 		task.Status,
 	)
 
-	for _, userID := range recipients {
+	for _, userID := range orderedRecipients {
 		if err := s.notify(userID, text); err != nil {
 			log.Printf("❌ notify user=%d failed: %v", userID, err)
 		}
@@ -142,16 +173,17 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		Title       string `json:"title"`
 		Description string `json:"description"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "неверный формат запроса"})
-		return
-	}
-	if strings.TrimSpace(req.Title) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "название задачи обязательно"})
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 
-	task := s.storage.AddTask(user.ID, req.Title, req.Description)
+	title, description, err := bot.ValidateTaskText(req.Title, req.Description)
+	if err != nil {
+		writeStorageError(w, err)
+		return
+	}
+
+	task := s.storage.AddTask(user.ID, title, description)
 	writeJSON(w, http.StatusCreated, task)
 }
 
@@ -159,7 +191,7 @@ func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(userContextKey).(*TelegramUser)
 
 	idStr := r.PathValue("id")
-	taskID, err := strconv.Atoi(idStr)
+	taskID, err := positiveID(idStr)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "неверный ID задачи"})
 		return
@@ -168,8 +200,7 @@ func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Status string `json:"status"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "неверный формат запроса"})
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 
@@ -192,7 +223,7 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(userContextKey).(*TelegramUser)
 
 	idStr := r.PathValue("id")
-	taskID, err := strconv.Atoi(idStr)
+	taskID, err := positiveID(idStr)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "неверный ID задачи"})
 		return
@@ -224,8 +255,7 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name string `json:"name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "неверный формат запроса"})
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 
@@ -285,8 +315,7 @@ func (s *Server) handleAddGroupMember(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "неверный формат запроса"})
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	if strings.TrimSpace(req.Username) == "" {
@@ -312,7 +341,7 @@ func (s *Server) handleDeleteGroupMember(w http.ResponseWriter, r *http.Request)
 	}
 
 	memberID, err := strconv.ParseInt(r.PathValue("memberId"), 10, 64)
-	if err != nil {
+	if err != nil || memberID <= 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "неверный ID участника"})
 		return
 	}
@@ -358,8 +387,7 @@ func (s *Server) handleCreateGroupTask(w http.ResponseWriter, r *http.Request) {
 		Description      string `json:"description"`
 		AssigneeUsername string `json:"assignee_username"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "неверный формат запроса"})
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 
@@ -390,8 +418,7 @@ func (s *Server) handleUpdateGroupTaskStatus(w http.ResponseWriter, r *http.Requ
 	var req struct {
 		Status string `json:"status"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "неверный формат запроса"})
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 
@@ -430,8 +457,13 @@ func (s *Server) handleSetGroupTaskAssignee(w http.ResponseWriter, r *http.Reque
 	var req struct {
 		AssigneeUsername string `json:"assignee_username"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "неверный формат запроса"})
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	previousTask, err := s.storage.GetGroupTask(user.ID, groupID, taskID)
+	if err != nil {
+		writeStorageError(w, err)
 		return
 	}
 
@@ -441,7 +473,11 @@ func (s *Server) handleSetGroupTaskAssignee(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	s.notifyGroupTaskEvent(groupID, task, "Изменён ответственный групповой задачи")
+	var previousAssignee []int64
+	if previousTask.AssigneeUserID != nil {
+		previousAssignee = append(previousAssignee, *previousTask.AssigneeUserID)
+	}
+	s.notifyGroupTaskEvent(groupID, task, "Изменён ответственный групповой задачи", previousAssignee...)
 	writeJSON(w, http.StatusOK, task)
 }
 
@@ -473,5 +509,30 @@ func (s *Server) handleDeleteGroupTask(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("❌ encode JSON response: %v", err)
+	}
+}
+
+// decodeJSONBody ограничивает память, запрещает опечатки в именах полей и
+// отклоняет несколько JSON-объектов в одном запросе.
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst interface{}) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodySize)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(dst); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "тело запроса слишком велико"})
+		} else {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "неверный формат запроса"})
+		}
+		return false
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "в запросе должен быть один JSON-объект"})
+		return false
+	}
+	return true
 }

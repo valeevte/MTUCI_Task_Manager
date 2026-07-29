@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"log"
 	"sync"
 
@@ -25,7 +26,7 @@ type Bot struct {
 	api       *tgbotapi.BotAPI     // API-клиент для общения с Telegram
 	storage   *Storage             // Хранилище задач (общее с HTTP API)
 	users     map[int64]*UserState // Состояние диалога каждого пользователя
-	mu        sync.Mutex           // Мьютекс — защищает users от одновременного доступа из горутин
+	mu        sync.RWMutex         // Мьютекс — защищает users от одновременного доступа из горутин
 	webAppURL string               // URL Mini App (для кнопки в клавиатуре)
 }
 
@@ -60,7 +61,7 @@ func New(token string, storage *Storage, webAppURL string) (*Bot, error) {
 // Start запускает бесконечный цикл получения обновлений
 // Использует Long Polling — бот "слушает" Telegram и получает новые сообщения
 // ============================================================
-func (b *Bot) Start() {
+func (b *Bot) Start(ctx context.Context) {
 	// Настраиваем параметры получения обновлений
 	config := tgbotapi.NewUpdate(0)
 	config.Timeout = 30 // Ждём обновления до 30 секунд (long polling)
@@ -68,11 +69,19 @@ func (b *Bot) Start() {
 	// GetUpdatesChan возвращает Go-канал (channel), куда приходят обновления
 	updates := b.api.GetUpdatesChan(config)
 
-	// Читаем обновления из канала в бесконечном цикле
-	for update := range updates {
-		// Каждое обновление обрабатываем в отдельной горутине (goroutine)
-		// Это позволяет обрабатывать несколько сообщений одновременно
-		go b.handleUpdate(update)
+	for {
+		select {
+		case <-ctx.Done():
+			b.api.StopReceivingUpdates()
+			return
+		case update, ok := <-updates:
+			if !ok {
+				return
+			}
+			// Telegram доставляет updates по порядку. Последовательная обработка
+			// не даёт двум быстрым сообщениям пользователя перепутать шаги диалога.
+			b.handleUpdate(update)
+		}
 	}
 }
 
@@ -100,22 +109,28 @@ func (b *Bot) handleUpdate(update tgbotapi.Update) {
 
 // ============================================================
 // Вспомогательные методы для работы с состоянием пользователя
-// Мьютекс (mu) нужен, потому что горутины работают параллельно
-// и могут одновременно читать/писать в map — это вызовет ошибку
+// Мьютекс (mu) сохраняет безопасность состояния и для тестов/будущих
+// обработчиков, которые могут вызывать методы бота параллельно.
 // ============================================================
 
-// getUserState возвращает текущее состояние пользователя
-func (b *Bot) getUserState(userID int64) *UserState {
+// getUserState возвращает копию состояния: указатель на map-значение нельзя
+// безопасно читать после снятия блокировки, пока обновления идут параллельно.
+func (b *Bot) getUserState(userID int64) UserState {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if state, exists := b.users[userID]; exists {
+		return *state
+	}
+	return UserState{}
+}
+
+func (b *Bot) setUserState(userID int64, state UserState) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	state, exists := b.users[userID]
-	if !exists {
-		// Если пользователь новый — создаём пустое состояние
-		state = &UserState{}
-		b.users[userID] = state
-	}
-	return state
+	stateCopy := state
+	b.users[userID] = &stateCopy
 }
 
 // resetUserState сбрасывает состояние пользователя в начальное
@@ -123,7 +138,8 @@ func (b *Bot) resetUserState(userID int64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.users[userID] = &UserState{}
+	// Удаление вместо хранения пустой записи не даёт map бесконечно расти.
+	delete(b.users, userID)
 }
 
 // registerUser сохраняет данные Telegram-пользователя для группового режима.

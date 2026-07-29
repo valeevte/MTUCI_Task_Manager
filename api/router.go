@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -53,7 +54,7 @@ func (s *Server) Router() http.Handler {
 	mux.Handle("/", fs)
 
 	// Оборачиваем в middleware: логирование → CORS → маршрутизация
-	return loggingMiddleware(corsMiddleware(mux))
+	return loggingMiddleware(securityHeadersMiddleware(corsMiddleware(mux)))
 }
 
 func findWebDir() string {
@@ -81,13 +82,30 @@ func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		// Логируем только API-запросы (не статические файлы)
-		if len(r.URL.Path) >= 4 && r.URL.Path[:4] == "/api" {
+		if isAPIPath(r.URL.Path) {
 			log.Printf("📥 %s %s (Auth: %v)", r.Method, r.URL.Path, r.Header.Get("Authorization") != "")
 		}
 		next.ServeHTTP(w, r)
-		if len(r.URL.Path) >= 4 && r.URL.Path[:4] == "/api" {
+		if isAPIPath(r.URL.Path) {
 			log.Printf("📤 %s %s — %s", r.Method, r.URL.Path, time.Since(start))
 		}
+	})
+}
+
+func isAPIPath(path string) bool {
+	return path == "/api" || strings.HasPrefix(path, "/api/")
+}
+
+func securityHeadersMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		if isAPIPath(r.URL.Path) {
+			// Ответы API зависят от пользователя и не должны попадать в кэш.
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

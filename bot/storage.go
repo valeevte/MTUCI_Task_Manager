@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // ============================================================
@@ -16,6 +17,12 @@ const (
 	StatusNew        = "🆕 Новая"
 	StatusInProgress = "🔄 В работе"
 	StatusDone       = "✅ Выполнена"
+
+	// Ограничения не дают одному запросу бесконтрольно раздувать in-memory
+	// хранилище и одновременно оставляют достаточно места для обычных задач.
+	MaxTaskTitleLength       = 200
+	MaxTaskDescriptionLength = 4000
+	MaxGroupNameLength       = 100
 )
 
 var usernamePattern = regexp.MustCompile(`^[a-zA-Z0-9_]{5,32}$`)
@@ -29,12 +36,17 @@ var (
 	ErrForbidden              = errors.New("forbidden")
 	ErrInvalidGroupName       = errors.New("invalid group name")
 	ErrInvalidTaskTitle       = errors.New("invalid task title")
+	ErrTaskTitleTooLong       = errors.New("task title is too long")
+	ErrTaskDescriptionTooLong = errors.New("task description is too long")
+	ErrGroupNameTooLong       = errors.New("group name is too long")
+	ErrInvalidStatus          = errors.New("invalid task status")
 	ErrInvalidUsername        = errors.New("invalid username")
 	ErrUserNotFound           = errors.New("user not found")
 	ErrUserAlreadyInGroup     = errors.New("user already in group")
 	ErrMemberNotFound         = errors.New("member not found")
 	ErrCreatorCannotBeRemoved = errors.New("creator cannot be removed")
 	ErrOnlyCreatorCanDelete   = errors.New("only creator can delete group")
+	ErrOnlyCreatorCanManage   = errors.New("only creator can manage group members")
 	ErrAssigneeMustBeMember   = errors.New("assignee must be member of group")
 )
 
@@ -134,6 +146,8 @@ func (s *Storage) AddTask(userID int64, title, description string) Task {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	title = strings.TrimSpace(title)
+	description = strings.TrimSpace(description)
 	s.nextID[userID]++
 	id := s.nextID[userID]
 
@@ -169,6 +183,10 @@ func (s *Storage) GetTask(userID int64, taskID int) (Task, bool) {
 }
 
 func (s *Storage) UpdateStatus(userID int64, taskID int, newStatus string) bool {
+	if !IsValidStatus(newStatus) {
+		return false
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -179,6 +197,33 @@ func (s *Storage) UpdateStatus(userID int64, taskID int, newStatus string) bool 
 		}
 	}
 	return false
+}
+
+// ValidateTaskText централизует одинаковую валидацию для бота и HTTP API.
+func ValidateTaskText(title, description string) (string, string, error) {
+	title = strings.TrimSpace(title)
+	description = strings.TrimSpace(description)
+
+	if title == "" {
+		return "", "", ErrInvalidTaskTitle
+	}
+	if utf8.RuneCountInString(title) > MaxTaskTitleLength {
+		return "", "", ErrTaskTitleTooLong
+	}
+	if utf8.RuneCountInString(description) > MaxTaskDescriptionLength {
+		return "", "", ErrTaskDescriptionTooLong
+	}
+	return title, description, nil
+}
+
+// IsValidStatus не позволяет записать произвольную строку вместо статуса.
+func IsValidStatus(status string) bool {
+	switch status {
+	case StatusNew, StatusInProgress, StatusDone:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Storage) DeleteTask(userID int64, taskID int) bool {
@@ -234,7 +279,11 @@ func (s *Storage) UpsertVerifiedUser(userID int64, username, firstName, lastName
 	}
 
 	if old, ok := s.usersByID[userID]; ok && old.Username != "" && old.Username != normalized {
-		delete(s.userIDByUsername, old.Username)
+		// Username мог уже перейти к другому пользователю. Удаляем индекс только
+		// если он всё ещё указывает на обновляемую запись.
+		if indexedID, exists := s.userIDByUsername[old.Username]; exists && indexedID == userID {
+			delete(s.userIDByUsername, old.Username)
+		}
 	}
 
 	user := VerifiedUser{
@@ -247,6 +296,14 @@ func (s *Storage) UpsertVerifiedUser(userID int64, username, firstName, lastName
 	s.usersByID[userID] = user
 
 	if normalized != "" {
+		// Telegram usernames уникальны, но могут переходить между аккаунтами.
+		// Очищаем устаревшую запись прежнего владельца, чтобы индекс и данные
+		// пользователя не противоречили друг другу.
+		if previousID, exists := s.userIDByUsername[normalized]; exists && previousID != userID {
+			previous := s.usersByID[previousID]
+			previous.Username = ""
+			s.usersByID[previousID] = previous
+		}
 		s.userIDByUsername[normalized] = userID
 	}
 
@@ -288,6 +345,9 @@ func (s *Storage) CreateGroup(actorID int64, name string) (Group, error) {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
 		return Group{}, ErrInvalidGroupName
+	}
+	if utf8.RuneCountInString(trimmed) > MaxGroupNameLength {
+		return Group{}, ErrGroupNameTooLong
 	}
 
 	s.mu.Lock()
@@ -424,6 +484,9 @@ func (s *Storage) AddGroupMemberByUsername(actorID int64, groupID int, username 
 	if err != nil {
 		return GroupMember{}, err
 	}
+	if group.CreatorID != actorID {
+		return GroupMember{}, ErrOnlyCreatorCanManage
+	}
 
 	targetID, ok := s.userIDByUsername[normalized]
 	if !ok {
@@ -451,6 +514,10 @@ func (s *Storage) RemoveGroupMember(actorID int64, groupID int, memberID int64) 
 
 	if group.CreatorID == memberID {
 		return ErrCreatorCannotBeRemoved
+	}
+	// Участник может выйти сам; исключать других может только создатель.
+	if group.CreatorID != actorID && actorID != memberID {
+		return ErrOnlyCreatorCanManage
 	}
 
 	if _, ok := s.groupMembers[groupID][memberID]; !ok {
@@ -501,9 +568,9 @@ func (s *Storage) resolveAssigneeLocked(groupID int, assigneeUsername string) (*
 }
 
 func (s *Storage) CreateGroupTask(actorID int64, groupID int, title, description, assigneeUsername string) (GroupTask, error) {
-	trimmedTitle := strings.TrimSpace(title)
-	if trimmedTitle == "" {
-		return GroupTask{}, ErrInvalidTaskTitle
+	trimmedTitle, trimmedDescription, err := ValidateTaskText(title, description)
+	if err != nil {
+		return GroupTask{}, err
 	}
 
 	s.mu.Lock()
@@ -524,7 +591,7 @@ func (s *Storage) CreateGroupTask(actorID int64, groupID int, title, description
 		ID:             s.nextGroupTaskID[groupID],
 		GroupID:        groupID,
 		Title:          trimmedTitle,
-		Description:    strings.TrimSpace(description),
+		Description:    trimmedDescription,
 		Status:         StatusNew,
 		CreatedBy:      actorID,
 		AssigneeUserID: assigneeID,
@@ -557,7 +624,26 @@ func (s *Storage) GetGroupTasks(actorID int64, groupID int) ([]GroupTask, error)
 	return result, nil
 }
 
+func (s *Storage) GetGroupTask(actorID int64, groupID, taskID int) (GroupTask, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if _, err := s.ensureGroupMemberLocked(groupID, actorID); err != nil {
+		return GroupTask{}, err
+	}
+	for _, task := range s.groupTasks[groupID] {
+		if task.ID == taskID {
+			return s.taskForResponse(task), nil
+		}
+	}
+	return GroupTask{}, ErrGroupTaskNotFound
+}
+
 func (s *Storage) UpdateGroupTaskStatus(actorID int64, groupID, taskID int, newStatus string) (GroupTask, error) {
+	if !IsValidStatus(newStatus) {
+		return GroupTask{}, ErrInvalidStatus
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

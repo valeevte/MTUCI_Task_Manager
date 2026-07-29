@@ -10,15 +10,15 @@
 <body>
     <div id="app">
         <div class="tabs">
-            <button id="tab-personal" class="tab-btn active">Личные</button>
-            <button id="tab-groups" class="tab-btn">Группы</button>
+            <button type="button" id="tab-personal" class="tab-btn active">Личные</button>
+            <button type="button" id="tab-groups" class="tab-btn">Группы</button>
         </div>
 
         <section id="personal-root">
             <div id="personal-list-view">
                 <div class="header">
                     <h1>Мои задачи</h1>
-                    <button id="add-task-btn" class="btn-primary">+ Новая</button>
+                    <button type="button" id="add-task-btn" class="btn-primary">+ Новая</button>
                 </div>
                 <div id="tasks-container">
                     <div class="loading">Загрузка...</div>
@@ -26,7 +26,7 @@
                 <div id="empty-state" class="empty-state hidden">
                     <div class="empty-icon">📭</div>
                     <p>У тебя пока нет задач</p>
-                    <button id="create-first-task" class="btn-primary">Создать первую задачу</button>
+                    <button type="button" id="create-first-task" class="btn-primary">Создать первую задачу</button>
                 </div>
             </div>
 
@@ -37,11 +37,11 @@
                 <form id="create-task-form">
                     <div class="form-group">
                         <label for="task-title">Название</label>
-                        <input type="text" id="task-title" placeholder="Что нужно сделать?" required>
+                        <input type="text" id="task-title" placeholder="Что нужно сделать?" maxlength="200" required>
                     </div>
                     <div class="form-group">
                         <label for="task-description">Описание (необязательно)</label>
-                        <textarea id="task-description" placeholder="Подробности задачи..." rows="3"></textarea>
+                        <textarea id="task-description" placeholder="Подробности задачи..." rows="3" maxlength="4000"></textarea>
                     </div>
                     <div class="form-actions">
                         <button type="button" id="cancel-create-task" class="btn-secondary">Отмена</button>
@@ -52,7 +52,7 @@
 
             <div id="personal-detail-view" class="hidden">
                 <div class="header">
-                    <button id="personal-back-btn" class="btn-back">&#8592; Назад</button>
+                    <button type="button" id="personal-back-btn" class="btn-back">&#8592; Назад</button>
                 </div>
                 <div id="task-detail-content"></div>
             </div>
@@ -65,7 +65,7 @@
                 </div>
 
                 <form id="create-group-form" class="inline-form">
-                    <input type="text" id="group-name" placeholder="Название группы" required>
+                    <input type="text" id="group-name" placeholder="Название группы" maxlength="100" required>
                     <button type="submit" class="btn-primary">Создать</button>
                 </form>
 
@@ -81,8 +81,8 @@
 
             <div id="group-board-view" class="hidden">
                 <div class="header">
-                    <button id="group-board-back-btn" class="btn-back">&#8592; К группам</button>
-                    <button id="delete-group-btn" class="btn-danger-outline hidden">Удалить группу</button>
+                    <button type="button" id="group-board-back-btn" class="btn-back">&#8592; К группам</button>
+                    <button type="button" id="delete-group-btn" class="btn-danger-outline hidden">Удалить группу</button>
                 </div>
 
                 <h2 id="group-title" class="section-heading"></h2>
@@ -90,7 +90,7 @@
                 <div class="section-block">
                     <div class="section-title">Участники</div>
                     <form id="add-member-form" class="inline-form">
-                        <input type="text" id="member-username" placeholder="@username" required>
+                        <input type="text" id="member-username" placeholder="@username" maxlength="33" autocomplete="off" spellcheck="false" required>
                         <button type="submit" class="btn-primary">Добавить</button>
                     </form>
                     <div id="members-container"></div>
@@ -99,7 +99,7 @@
                 <div class="section-block">
                     <div class="section-header-row">
                         <div class="section-title">Задачи группы</div>
-                        <button id="add-group-task-btn" class="btn-primary">+ Задача</button>
+                        <button type="button" id="add-group-task-btn" class="btn-primary">+ Задача</button>
                     </div>
                     <div id="group-tasks-container"></div>
                     <div id="group-tasks-empty" class="empty-state hidden">
@@ -111,24 +111,24 @@
 
             <div id="group-task-create-view" class="hidden">
                 <div class="header">
-                    <button id="group-task-create-back-btn" class="btn-back">&#8592; Назад</button>
+                    <button type="button" id="group-task-create-back-btn" class="btn-back">&#8592; Назад</button>
                     <h1>Новая групповая задача</h1>
                 </div>
 
                 <form id="create-group-task-form">
                     <div class="form-group">
                         <label for="group-task-title">Название</label>
-                        <input type="text" id="group-task-title" required>
+                        <input type="text" id="group-task-title" maxlength="200" required>
                     </div>
 
                     <div class="form-group">
                         <label for="group-task-description">Описание (необязательно)</label>
-                        <textarea id="group-task-description" rows="3"></textarea>
+                        <textarea id="group-task-description" rows="3" maxlength="4000"></textarea>
                     </div>
 
                     <div class="form-group">
                         <label for="group-task-assignee">Ответственный (необязательно)</label>
-                        <input type="text" id="group-task-assignee" placeholder="@username">
+                        <input type="text" id="group-task-assignee" placeholder="@username" maxlength="33" autocomplete="off" spellcheck="false">
                     </div>
 
                     <div class="form-actions">
@@ -140,7 +140,7 @@
 
             <div id="group-task-detail-view" class="hidden">
                 <div class="header">
-                    <button id="group-task-detail-back-btn" class="btn-back">&#8592; Назад</button>
+                    <button type="button" id="group-task-detail-back-btn" class="btn-back">&#8592; Назад</button>
                 </div>
                 <div id="group-task-detail-content"></div>
             </div>

@@ -12,13 +12,21 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // contextKey — тип для ключей контекста (чтобы не было коллизий)
 type contextKey string
 
 const userContextKey contextKey = "user"
+
+const (
+	maxInitDataSize = 64 << 10
+	initDataMaxAge  = 24 * time.Hour
+	maxClockSkew    = 5 * time.Minute
+)
 
 // TelegramUser — данные пользователя из Telegram initData
 type TelegramUser struct {
@@ -32,31 +40,14 @@ func extractInitData(r *http.Request) string {
 	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
 	if authHeader != "" {
 		lower := strings.ToLower(authHeader)
-		switch {
-		case strings.HasPrefix(lower, "tma "):
+		if strings.HasPrefix(lower, "tma ") {
 			return strings.TrimSpace(authHeader[4:])
-		case strings.HasPrefix(lower, "bearer "):
-			token := strings.TrimSpace(authHeader[7:])
-			tokenLower := strings.ToLower(token)
-			if strings.HasPrefix(tokenLower, "tma ") {
-				return strings.TrimSpace(token[4:])
-			}
-			return token
-		default:
-			return authHeader
 		}
+		return ""
 	}
 
 	if h := strings.TrimSpace(r.Header.Get("X-Telegram-Init-Data")); h != "" {
 		return h
-	}
-
-	if q := strings.TrimSpace(r.URL.Query().Get("initData")); q != "" {
-		return q
-	}
-
-	if q := strings.TrimSpace(r.URL.Query().Get("tgWebAppData")); q != "" {
-		return q
 	}
 
 	return ""
@@ -88,7 +79,13 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		initData := extractInitData(r)
 		if initData == "" {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{
-				"error": "отсутствуют auth данные (Authorization, X-Telegram-Init-Data, initData)",
+				"error": "отсутствуют данные авторизации Telegram",
+			})
+			return
+		}
+		if len(initData) > maxInitDataSize {
+			writeJSON(w, http.StatusRequestHeaderFieldsTooLarge, map[string]string{
+				"error": "данные авторизации слишком велики",
 			})
 			return
 		}
@@ -98,7 +95,7 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		if err != nil {
 			log.Printf("❌ Ошибка авторизации: %v", err)
 			writeJSON(w, http.StatusUnauthorized, map[string]string{
-				"error": "неверная авторизация: " + err.Error(),
+				"error": "неверная или устаревшая авторизация Telegram",
 			})
 			return
 		}
@@ -125,6 +122,14 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 // Документация: https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
 // ============================================================
 func validateInitData(initData, botToken string) (*TelegramUser, error) {
+	return validateInitDataAt(initData, botToken, time.Now())
+}
+
+func validateInitDataAt(initData, botToken string, now time.Time) (*TelegramUser, error) {
+	if botToken == "" {
+		return nil, fmt.Errorf("токен бота не задан")
+	}
+
 	// Парсим initData как URL query string
 	values, err := url.ParseQuery(initData)
 	if err != nil {
@@ -132,8 +137,8 @@ func validateInitData(initData, botToken string) (*TelegramUser, error) {
 	}
 
 	// Извлекаем hash (подпись от Telegram)
-	hash := values.Get("hash")
-	if hash == "" {
+	receivedHash, err := hex.DecodeString(values.Get("hash"))
+	if err != nil || len(receivedHash) != sha256.Size {
 		return nil, fmt.Errorf("hash не найден в initData")
 	}
 
@@ -162,11 +167,23 @@ func validateInitData(initData, botToken string) (*TelegramUser, error) {
 	// Шаг 2: hash = HMAC-SHA256(key=secretKey, data=dataCheckString)
 	mac2 := hmac.New(sha256.New, secretKey)
 	mac2.Write([]byte(dataCheckString))
-	calculatedHash := hex.EncodeToString(mac2.Sum(nil))
+	calculatedHash := mac2.Sum(nil)
 
-	// Сравниваем вычисленный hash с полученным
-	if calculatedHash != hash {
+	// Constant-time сравнение не раскрывает подпись по времени ответа.
+	if !hmac.Equal(calculatedHash, receivedHash) {
 		return nil, fmt.Errorf("подпись не совпадает")
+	}
+
+	authDateUnix, err := strconv.ParseInt(values.Get("auth_date"), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("auth_date не найден или имеет неверный формат")
+	}
+	authDate := time.Unix(authDateUnix, 0)
+	if authDate.After(now.Add(maxClockSkew)) {
+		return nil, fmt.Errorf("auth_date находится в будущем")
+	}
+	if now.Sub(authDate) > initDataMaxAge {
+		return nil, fmt.Errorf("initData устарели")
 	}
 
 	// Извлекаем данные пользователя из параметра "user"
@@ -178,6 +195,9 @@ func validateInitData(initData, botToken string) (*TelegramUser, error) {
 	var user TelegramUser
 	if err := json.Unmarshal([]byte(userData), &user); err != nil {
 		return nil, fmt.Errorf("ошибка парсинга данных пользователя: %v", err)
+	}
+	if user.ID <= 0 || strings.TrimSpace(user.FirstName) == "" {
+		return nil, fmt.Errorf("данные пользователя неполны")
 	}
 
 	return &user, nil
