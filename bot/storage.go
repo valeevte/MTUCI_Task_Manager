@@ -36,6 +36,8 @@ var (
 	ErrForbidden              = errors.New("forbidden")
 	ErrInvalidGroupName       = errors.New("invalid group name")
 	ErrInvalidTaskTitle       = errors.New("invalid task title")
+	ErrTaskNotFound           = errors.New("task not found")
+	ErrEmptyTaskPatch         = errors.New("empty task patch")
 	ErrTaskTitleTooLong       = errors.New("task title is too long")
 	ErrTaskDescriptionTooLong = errors.New("task description is too long")
 	ErrGroupNameTooLong       = errors.New("group name is too long")
@@ -48,6 +50,11 @@ var (
 	ErrOnlyCreatorCanDelete   = errors.New("only creator can delete group")
 	ErrOnlyCreatorCanManage   = errors.New("only creator can manage group members")
 	ErrAssigneeMustBeMember   = errors.New("assignee must be member of group")
+	ErrAdminOnly              = errors.New("admin only")
+	ErrTaskEditForbidden      = errors.New("task edit forbidden")
+	ErrStatusChangeForbidden  = errors.New("status change forbidden")
+	ErrStatusTransitionForbidden = errors.New("status transition forbidden")
+	ErrCannotAssignAdmin      = errors.New("cannot assign admin")
 )
 
 // ============================================================
@@ -60,6 +67,7 @@ type Task struct {
 	Description string    `json:"description"`
 	Status      string    `json:"status"`
 	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // ============================================================
@@ -81,12 +89,19 @@ type Group struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type GroupRole string
+
+const (
+	GroupRoleAdmin GroupRole = "admin"
+	GroupRoleUser  GroupRole = "user"
+)
+
 type GroupMember struct {
-	UserID    int64  `json:"user_id"`
-	FirstName string `json:"first_name"`
-	LastName  string `json:"last_name"`
-	Username  string `json:"username"`
-	IsCreator bool   `json:"is_creator"`
+	UserID    int64     `json:"user_id"`
+	FirstName string    `json:"first_name"`
+	LastName  string    `json:"last_name"`
+	Username  string    `json:"username"`
+	Role      GroupRole `json:"role"`
 }
 
 type GroupTask struct {
@@ -117,7 +132,7 @@ type Storage struct {
 
 	// Группы
 	groups          map[int]Group
-	groupMembers    map[int]map[int64]struct{}
+	groupMembers    map[int]map[int64]GroupRole
 	groupTasks      map[int][]GroupTask
 	nextGroupID     int
 	nextGroupTaskID map[int]int
@@ -132,7 +147,7 @@ func NewStorage() *Storage {
 		usersByID:        make(map[int64]VerifiedUser),
 		userIDByUsername: make(map[string]int64),
 		groups:           make(map[int]Group),
-		groupMembers:     make(map[int]map[int64]struct{}),
+		groupMembers:     make(map[int]map[int64]GroupRole),
 		groupTasks:       make(map[int][]GroupTask),
 		nextGroupTaskID:  make(map[int]int),
 	}
@@ -151,12 +166,14 @@ func (s *Storage) AddTask(userID int64, title, description string) Task {
 	s.nextID[userID]++
 	id := s.nextID[userID]
 
+	now := time.Now()
 	task := Task{
 		ID:          id,
 		Title:       title,
 		Description: description,
 		Status:      StatusNew,
-		CreatedAt:   time.Now(),
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 
 	s.tasks[userID] = append(s.tasks[userID], task)
@@ -192,11 +209,55 @@ func (s *Storage) UpdateStatus(userID int64, taskID int, newStatus string) bool 
 
 	for i, task := range s.tasks[userID] {
 		if task.ID == taskID {
-			s.tasks[userID][i].Status = newStatus
+			if task.Status != newStatus {
+				s.tasks[userID][i].Status = newStatus
+				s.tasks[userID][i].UpdatedAt = time.Now()
+			}
 			return true
 		}
 	}
 	return false
+}
+
+// UpdateTask применяет частичное изменение личной задачи пользователя.
+func (s *Storage) UpdateTask(userID int64, taskID int, title, description *string) (Task, bool, error) {
+	if title == nil && description == nil {
+		return Task{}, false, ErrEmptyTaskPatch
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, task := range s.tasks[userID] {
+		if task.ID != taskID {
+			continue
+		}
+
+		newTitle := task.Title
+		if title != nil {
+			newTitle = *title
+		}
+		newDescription := task.Description
+		if description != nil {
+			newDescription = *description
+		}
+
+		newTitle, newDescription, err := ValidateTaskText(newTitle, newDescription)
+		if err != nil {
+			return Task{}, false, err
+		}
+		if task.Title == newTitle && task.Description == newDescription {
+			return task, false, nil
+		}
+
+		task.Title = newTitle
+		task.Description = newDescription
+		task.UpdatedAt = time.Now()
+		s.tasks[userID][i] = task
+		return task, true, nil
+	}
+
+	return Task{}, false, ErrTaskNotFound
 }
 
 // ValidateTaskText централизует одинаковую валидацию для бота и HTTP API.
@@ -224,6 +285,23 @@ func IsValidStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+func canEditGroupTask(role GroupRole, actorID int64, task GroupTask) bool {
+	return role == GroupRoleAdmin || task.CreatedBy == actorID
+}
+
+func canChangeGroupTaskStatus(role GroupRole, actorID int64, task GroupTask) bool {
+	if role == GroupRoleAdmin {
+		return true
+	}
+	return task.AssigneeUserID == nil || *task.AssigneeUserID == actorID
+}
+
+func isAllowedUserStatusTransition(from, to string) bool {
+	return (from == StatusNew && to == StatusInProgress) ||
+		(from == StatusInProgress && to == StatusDone) ||
+		(from == StatusDone && to == StatusInProgress)
 }
 
 func (s *Storage) DeleteTask(userID int64, taskID int) bool {
@@ -315,13 +393,13 @@ func (s *Storage) userForResponse(user VerifiedUser) VerifiedUser {
 	return user
 }
 
-func (s *Storage) memberForResponse(user VerifiedUser, group Group) GroupMember {
+func (s *Storage) memberForResponse(user VerifiedUser, role GroupRole) GroupMember {
 	return GroupMember{
 		UserID:    user.ID,
 		FirstName: user.FirstName,
 		LastName:  user.LastName,
 		Username:  formatUsername(user.Username),
-		IsCreator: user.ID == group.CreatorID,
+		Role:      role,
 	}
 }
 
@@ -341,13 +419,21 @@ func (s *Storage) taskForResponse(task GroupTask) GroupTask {
 // Группы
 // ============================================================
 
-func (s *Storage) CreateGroup(actorID int64, name string) (Group, error) {
+func validateGroupName(name string) (string, error) {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
-		return Group{}, ErrInvalidGroupName
+		return "", ErrInvalidGroupName
 	}
 	if utf8.RuneCountInString(trimmed) > MaxGroupNameLength {
-		return Group{}, ErrGroupNameTooLong
+		return "", ErrGroupNameTooLong
+	}
+	return trimmed, nil
+}
+
+func (s *Storage) CreateGroup(actorID int64, name string) (Group, error) {
+	trimmed, err := validateGroupName(name)
+	if err != nil {
+		return Group{}, err
 	}
 
 	s.mu.Lock()
@@ -363,8 +449,33 @@ func (s *Storage) CreateGroup(actorID int64, name string) (Group, error) {
 	}
 
 	s.groups[id] = group
-	s.groupMembers[id] = map[int64]struct{}{actorID: {}}
+	s.groupMembers[id] = map[int64]GroupRole{actorID: GroupRoleAdmin}
 	return group, nil
+}
+
+func (s *Storage) UpdateGroupName(actorID int64, groupID int, name string) (Group, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	group, role, err := s.ensureGroupMemberLocked(groupID, actorID)
+	if err != nil {
+		return Group{}, false, err
+	}
+	if role != GroupRoleAdmin {
+		return Group{}, false, ErrAdminOnly
+	}
+
+	trimmed, err := validateGroupName(name)
+	if err != nil {
+		return Group{}, false, err
+	}
+	if group.Name == trimmed {
+		return group, false, nil
+	}
+
+	group.Name = trimmed
+	s.groups[groupID] = group
+	return group, true, nil
 }
 
 func (s *Storage) GetGroup(groupID int) (Group, bool) {
@@ -417,50 +528,51 @@ func (s *Storage) DeleteGroup(actorID int64, groupID int) error {
 	return nil
 }
 
-func (s *Storage) ensureGroupMemberLocked(groupID int, userID int64) (Group, error) {
+func (s *Storage) ensureGroupMemberLocked(groupID int, userID int64) (Group, GroupRole, error) {
 	group, ok := s.groups[groupID]
 	if !ok {
-		return Group{}, ErrGroupNotFound
+		return Group{}, "", ErrGroupNotFound
 	}
 
 	members, ok := s.groupMembers[groupID]
 	if !ok {
-		return Group{}, ErrGroupNotFound
+		return Group{}, "", ErrGroupNotFound
 	}
 
-	if _, exists := members[userID]; !exists {
-		return Group{}, ErrForbidden
+	role, exists := members[userID]
+	if !exists {
+		return Group{}, "", ErrForbidden
 	}
 
-	return group, nil
+	return group, role, nil
 }
 
 func (s *Storage) GetGroupMembers(actorID int64, groupID int) ([]GroupMember, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	group, err := s.ensureGroupMemberLocked(groupID, actorID)
+	_, _, err := s.ensureGroupMemberLocked(groupID, actorID)
 	if err != nil {
 		return nil, err
 	}
 
 	members := make([]GroupMember, 0, len(s.groupMembers[groupID]))
-	for memberID := range s.groupMembers[groupID] {
+	for memberID, role := range s.groupMembers[groupID] {
 		user, ok := s.usersByID[memberID]
 		if !ok {
 			members = append(members, GroupMember{
 				UserID:    memberID,
 				FirstName: "Участник",
-				IsCreator: memberID == group.CreatorID,
+				Role:      role,
 			})
 			continue
 		}
-		members = append(members, s.memberForResponse(user, group))
+		members = append(members, s.memberForResponse(user, role))
 	}
 
 	sort.Slice(members, func(i, j int) bool {
-		if members[i].IsCreator != members[j].IsCreator {
-			return members[i].IsCreator
+		if members[i].Role != members[j].Role {
+			return members[i].Role == GroupRoleAdmin
 		}
 		if members[i].Username == members[j].Username {
 			return members[i].UserID < members[j].UserID
@@ -480,11 +592,11 @@ func (s *Storage) AddGroupMemberByUsername(actorID int64, groupID int, username 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	group, err := s.ensureGroupMemberLocked(groupID, actorID)
+	_, actorRole, err := s.ensureGroupMemberLocked(groupID, actorID)
 	if err != nil {
 		return GroupMember{}, err
 	}
-	if group.CreatorID != actorID {
+	if actorRole != GroupRoleAdmin {
 		return GroupMember{}, ErrOnlyCreatorCanManage
 	}
 
@@ -497,31 +609,31 @@ func (s *Storage) AddGroupMemberByUsername(actorID int64, groupID int, username 
 		return GroupMember{}, ErrUserAlreadyInGroup
 	}
 
-	s.groupMembers[groupID][targetID] = struct{}{}
+	s.groupMembers[groupID][targetID] = GroupRoleUser
 
 	user := s.usersByID[targetID]
-	return s.memberForResponse(user, group), nil
+	return s.memberForResponse(user, GroupRoleUser), nil
 }
 
 func (s *Storage) RemoveGroupMember(actorID int64, groupID int, memberID int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	group, err := s.ensureGroupMemberLocked(groupID, actorID)
+	_, actorRole, err := s.ensureGroupMemberLocked(groupID, actorID)
 	if err != nil {
 		return err
 	}
 
-	if group.CreatorID == memberID {
+	memberRole, exists := s.groupMembers[groupID][memberID]
+	if !exists {
+		return ErrMemberNotFound
+	}
+	if memberRole == GroupRoleAdmin {
 		return ErrCreatorCannotBeRemoved
 	}
-	// Участник может выйти сам; исключать других может только создатель.
-	if group.CreatorID != actorID && actorID != memberID {
+	// Участник может выйти сам; исключать других может только администратор.
+	if actorRole != GroupRoleAdmin && actorID != memberID {
 		return ErrOnlyCreatorCanManage
-	}
-
-	if _, ok := s.groupMembers[groupID][memberID]; !ok {
-		return ErrMemberNotFound
 	}
 
 	delete(s.groupMembers[groupID], memberID)
@@ -576,7 +688,7 @@ func (s *Storage) CreateGroupTask(actorID int64, groupID int, title, description
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, err := s.ensureGroupMemberLocked(groupID, actorID); err != nil {
+	if _, _, err := s.ensureGroupMemberLocked(groupID, actorID); err != nil {
 		return GroupTask{}, err
 	}
 
@@ -607,7 +719,7 @@ func (s *Storage) GetGroupTasks(actorID int64, groupID int) ([]GroupTask, error)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if _, err := s.ensureGroupMemberLocked(groupID, actorID); err != nil {
+	if _, _, err := s.ensureGroupMemberLocked(groupID, actorID); err != nil {
 		return nil, err
 	}
 
@@ -628,7 +740,7 @@ func (s *Storage) GetGroupTask(actorID int64, groupID, taskID int) (GroupTask, e
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if _, err := s.ensureGroupMemberLocked(groupID, actorID); err != nil {
+	if _, _, err := s.ensureGroupMemberLocked(groupID, actorID); err != nil {
 		return GroupTask{}, err
 	}
 	for _, task := range s.groupTasks[groupID] {
@@ -647,7 +759,7 @@ func (s *Storage) UpdateGroupTaskStatus(actorID int64, groupID, taskID int, newS
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, err := s.ensureGroupMemberLocked(groupID, actorID); err != nil {
+	if _, _, err := s.ensureGroupMemberLocked(groupID, actorID); err != nil {
 		return GroupTask{}, err
 	}
 
@@ -666,7 +778,7 @@ func (s *Storage) SetGroupTaskAssignee(actorID int64, groupID, taskID int, assig
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, err := s.ensureGroupMemberLocked(groupID, actorID); err != nil {
+	if _, _, err := s.ensureGroupMemberLocked(groupID, actorID); err != nil {
 		return GroupTask{}, err
 	}
 
@@ -690,7 +802,7 @@ func (s *Storage) DeleteGroupTask(actorID int64, groupID, taskID int) (GroupTask
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, err := s.ensureGroupMemberLocked(groupID, actorID); err != nil {
+	if _, _, err := s.ensureGroupMemberLocked(groupID, actorID); err != nil {
 		return GroupTask{}, err
 	}
 
